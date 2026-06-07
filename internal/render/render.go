@@ -1,57 +1,89 @@
 // Package render turns a fire grid into ANSI frames using half-block glyphs (▀):
 // foreground is the top pixel, background the bottom. Frames are wrapped in DEC
 // synchronized output (2026) and diffed against the previous frame.
+//
+// Each frame is assembled into a single reusable byte buffer and written in one
+// call, so the steady state is allocation-free and costs one write per frame.
 package render
 
 import (
-	"bufio"
+	"io"
 	"strconv"
 
 	"doomfire/internal/fire"
 )
 
-// Precomputed SGR fragments (e.g. "38;2;r;g;b") so the render loop never formats ints.
+const n = len(fire.Palette)
+
+// Fully precomputed escape sequences so the render loop only ever copies bytes.
+//
+//	fgSeq[i]      = "\x1b[38;2;r;g;bm"            set foreground to palette i
+//	bgSeq[i]      = "\x1b[48;2;r;g;bm"            set background to palette i
+//	pairSeq[t][b] = "\x1b[38;2;..;48;2;..m"       set both at once (the common case)
 var (
-	fgParam   [len(fire.Palette)][]byte
-	bgParam   [len(fire.Palette)][]byte
+	fgSeq     [n][]byte
+	bgSeq     [n][]byte
+	pairSeq   [n][n][]byte
 	halfBlock = []byte("▀")
+	syncOn    = []byte("\x1b[?2026h")
+	syncOff   = []byte("\x1b[?2026l")
 )
 
 func init() {
+	rgb := func(c [3]uint8) string {
+		return strconv.Itoa(int(c[0])) + ";" + strconv.Itoa(int(c[1])) + ";" + strconv.Itoa(int(c[2]))
+	}
 	for i, c := range fire.Palette {
-		rgb := strconv.Itoa(int(c[0])) + ";" + strconv.Itoa(int(c[1])) + ";" + strconv.Itoa(int(c[2]))
-		fgParam[i] = []byte("38;2;" + rgb)
-		bgParam[i] = []byte("48;2;" + rgb)
+		fr := rgb(c)
+		fgSeq[i] = []byte("\x1b[38;2;" + fr + "m")
+		bgSeq[i] = []byte("\x1b[48;2;" + fr + "m")
+	}
+	for t := range fire.Palette {
+		ft := rgb(fire.Palette[t])
+		for b := range fire.Palette {
+			pairSeq[t][b] = []byte("\x1b[38;2;" + ft + ";48;2;" + rgb(fire.Palette[b]) + "m")
+		}
 	}
 }
 
 type Renderer struct {
 	prev []uint8
-	full bool // force a full redraw
+	full bool   // force a full redraw
+	buf  []byte // reused frame scratch buffer
 }
 
 func New(f *fire.Fire) *Renderer {
-	return &Renderer{prev: make([]uint8, f.Width()*f.Height()), full: true}
+	w, h := f.Width(), f.Height()
+	return &Renderer{
+		prev: make([]uint8, w*h),
+		full: true,
+		// Worst case per cell: cursor move (~10) + combined fg+bg SGR (~36) +
+		// glyph (3) ≈ 49 bytes. Over-allocate to 56 so the buffer never grows
+		// mid-animation (a reallocation would trigger GC and a visible hitch).
+		buf: make([]byte, 0, w*(h/2)*56+64),
+	}
 }
 
 // Reset forces the next Frame to redraw every cell (e.g. after a resize/clear).
 func (r *Renderer) Reset() { r.full = true }
 
-// Frame writes one diffed frame of f to buf and flushes it.
-func (r *Renderer) Frame(buf *bufio.Writer, f *fire.Fire) {
+// Frame builds one diffed frame of f into the internal buffer and writes it to w
+// in a single call.
+func (r *Renderer) Frame(w io.Writer, f *fire.Fire) {
 	px := f.Pixels()
-	w := f.Width()
+	width := f.Width()
 	rows := f.Height() / 2
 
-	buf.WriteString("\x1b[?2026h")
+	b := r.buf[:0]
+	b = append(b, syncOn...)
 
 	lastTop, lastBot := -1, -1
 	curRow, curCol := -1, -1 // tracked cursor (1-based); -1 == unknown
 
 	for row := range rows {
-		base0 := (row * 2) * w
-		base1 := base0 + w
-		for col := range w {
+		base0 := (row * 2) * width
+		base1 := base0 + width
+		for col := range width {
 			top := px[base0+col]
 			bot := px[base1+col]
 
@@ -62,58 +94,48 @@ func (r *Renderer) Frame(buf *bufio.Writer, f *fire.Fire) {
 			r.prev[base1+col] = bot
 
 			if curRow != row+1 || curCol != col+1 {
-				buf.WriteString("\x1b[")
-				writeUint(buf, row+1)
-				buf.WriteByte(';')
-				writeUint(buf, col+1)
-				buf.WriteByte('H')
+				b = append(b, '\x1b', '[')
+				b = appendUint(b, row+1)
+				b = append(b, ';')
+				b = appendUint(b, col+1)
+				b = append(b, 'H')
 			}
 
 			it, ib := int(top), int(bot)
 			switch {
 			case it != lastTop && ib != lastBot:
-				buf.WriteString("\x1b[")
-				buf.Write(fgParam[top])
-				buf.WriteByte(';')
-				buf.Write(bgParam[bot])
-				buf.WriteByte('m')
+				b = append(b, pairSeq[top][bot]...)
 				lastTop, lastBot = it, ib
 			case it != lastTop:
-				buf.WriteString("\x1b[")
-				buf.Write(fgParam[top])
-				buf.WriteByte('m')
+				b = append(b, fgSeq[top]...)
 				lastTop = it
 			case ib != lastBot:
-				buf.WriteString("\x1b[")
-				buf.Write(bgParam[bot])
-				buf.WriteByte('m')
+				b = append(b, bgSeq[bot]...)
 				lastBot = ib
 			}
 
-			buf.Write(halfBlock)
+			b = append(b, halfBlock...)
 			curRow, curCol = row+1, col+2
 		}
 	}
 
-	buf.WriteString("\x1b[?2026l")
-	buf.Flush()
+	b = append(b, syncOff...)
+	r.buf = b
+	w.Write(b)
 	r.full = false
 }
 
-// writeUint writes a non-negative int as decimal, allocation-free.
-func writeUint(buf *bufio.Writer, n int) {
-	if n == 0 {
-		buf.WriteByte('0')
-		return
+// appendUint appends a non-negative int as decimal, allocation-free.
+func appendUint(b []byte, num int) []byte {
+	if num == 0 {
+		return append(b, '0')
 	}
 	var tmp [10]byte
 	i := len(tmp)
-	for n > 0 {
+	for num > 0 {
 		i--
-		tmp[i] = byte('0' + n%10)
-		n /= 10
+		tmp[i] = byte('0' + num%10)
+		num /= 10
 	}
-	for ; i < len(tmp); i++ {
-		buf.WriteByte(tmp[i])
-	}
+	return append(b, tmp[i:]...)
 }

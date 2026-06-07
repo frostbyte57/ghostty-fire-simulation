@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -15,7 +14,7 @@ import (
 	"doomfire/internal/terminal"
 )
 
-const fps = 30
+const fps = 60
 
 func main() {
 	term := terminal.Setup()
@@ -37,7 +36,7 @@ func main() {
 	rows, cols := terminal.Size()
 	f := fire.New(cols, rows*2)
 	r := render.New(f)
-	buf := bufio.NewWriterSize(term.Out(), cols*rows*8+64)
+	out := term.Out()
 
 	ticker := time.NewTicker(time.Second / fps)
 	defer ticker.Stop()
@@ -51,7 +50,7 @@ func main() {
 			term.Clear()
 		case <-ticker.C:
 			f.Step()
-			r.Frame(buf, f)
+			r.Frame(out, f)
 		}
 	}
 }
