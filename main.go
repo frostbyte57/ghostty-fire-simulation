@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"doomfire/internal/chooser"
 	"doomfire/internal/fire"
 	"doomfire/internal/render"
 	"doomfire/internal/terminal"
@@ -19,6 +20,16 @@ const fps = 60
 func main() {
 	term := terminal.Setup()
 	defer term.Restore()
+	out := term.Out()
+
+	// Color designer: let the user pick the flame's gradient before igniting.
+	stops, ok := chooser.Run(out, os.Stdin)
+	if !ok {
+		return // user quit during selection
+	}
+	fire.Palette = fire.BuildPalette(stops)
+	render.BuildEscapes()
+	term.Clear()
 
 	var quit atomic.Bool
 
@@ -36,7 +47,6 @@ func main() {
 	rows, cols := terminal.Size()
 	f := fire.New(cols, rows*2)
 	r := render.New(f)
-	out := term.Out()
 
 	ticker := time.NewTicker(time.Second / fps)
 	defer ticker.Stop()

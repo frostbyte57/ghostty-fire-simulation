@@ -36,7 +36,9 @@ type Terminal struct {
 func Setup() *Terminal {
 	orig, _ := exec.Command("stty", "-g").Output()
 	t := &Terminal{out: os.Stdout, sttyOrig: string(orig)}
-	t.stty("-echo", "-icanon", "min", "1", "time", "0")
+	// -isig so Ctrl-C arrives as a byte (3) we handle ourselves, instead of
+	// raising SIGINT and killing the process before Restore runs.
+	t.stty("-echo", "-icanon", "-isig", "min", "1", "time", "0")
 	t.out.WriteString("\x1b[?1049h")
 	t.out.WriteString("\x1b[?25l")
 	return t

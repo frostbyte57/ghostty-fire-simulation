@@ -29,7 +29,11 @@ var (
 	syncOff   = []byte("\x1b[?2026l")
 )
 
-func init() {
+func init() { BuildEscapes() }
+
+// BuildEscapes (re)computes the precomputed SGR tables from the current
+// fire.Palette. Call it after changing the palette and before rendering.
+func BuildEscapes() {
 	rgb := func(c [3]uint8) string {
 		return strconv.Itoa(int(c[0])) + ";" + strconv.Itoa(int(c[1])) + ";" + strconv.Itoa(int(c[2]))
 	}
