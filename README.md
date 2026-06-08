@@ -3,7 +3,7 @@
 The classic DOOM fire effect, animated across your whole terminal. Written in Go
 and tuned for [Ghostty](https://ghostty.org).
 
-https://github.com/frostbyte57/ghostty-fire-simulation/raw/main/assets/demo.mov
+https://github.com/frostbyte57/ghostty-fire-simulation/raw/main/assets/demo.mp4
 
 ## Run
 
