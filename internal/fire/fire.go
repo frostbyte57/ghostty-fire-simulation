@@ -13,14 +13,24 @@ type Fire struct {
 }
 
 func New(width, height int) *Fire {
-	f := &Fire{
-		width:  width,
-		height: height,
-		pixels: make([]uint8, width*height),
-		rng:    uint32(time.Now().UnixNano()) | 1,
-	}
-	f.ignite()
+	f := &Fire{rng: uint32(time.Now().UnixNano()) | 1}
+	f.Resize(width, height)
 	return f
+}
+
+// Resize re-fits the grid to the new dimensions and re-ignites the source row,
+// reusing the existing pixel buffer when it is large enough so resize events
+// don't allocate.
+func (f *Fire) Resize(width, height int) {
+	size := width * height
+	if cap(f.pixels) >= size {
+		f.pixels = f.pixels[:size]
+		clear(f.pixels)
+	} else {
+		f.pixels = make([]uint8, size)
+	}
+	f.width, f.height = width, height
+	f.ignite()
 }
 
 func (f *Fire) Width() int      { return f.width }

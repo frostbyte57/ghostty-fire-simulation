@@ -55,8 +55,8 @@ func main() {
 		select {
 		case <-resize:
 			rows, cols = terminal.Size()
-			f = fire.New(cols, rows*2)
-			r = render.New(f)
+			f.Resize(cols, rows*2)
+			r.Resize(f)
 			term.Clear()
 		case <-ticker.C:
 			f.Step()

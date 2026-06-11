@@ -8,7 +8,6 @@ package render
 
 import (
 	"io"
-	"strconv"
 
 	"doomfire/internal/fire"
 )
@@ -33,21 +32,50 @@ func init() { BuildEscapes() }
 
 // BuildEscapes (re)computes the precomputed SGR tables from the current
 // fire.Palette. Call it after changing the palette and before rendering.
+//
+// All sequences are slices into one contiguous arena: a single allocation
+// instead of ~1.4k tiny ones, with no per-object overhead or size-class
+// rounding waste. The arena is sized for the worst case up front and must
+// never grow once slicing starts, or earlier slices would alias a stale array.
 func BuildEscapes() {
-	rgb := func(c [3]uint8) string {
-		return strconv.Itoa(int(c[0])) + ";" + strconv.Itoa(int(c[1])) + ";" + strconv.Itoa(int(c[2]))
-	}
+	const (
+		maxSingle = len("\x1b[38;2;255;255;255m")
+		maxPair   = len("\x1b[38;2;255;255;255;48;2;255;255;255m")
+	)
+	arena := make([]byte, 0, 2*n*maxSingle+n*n*maxPair)
+	// take returns the bytes appended since start, capacity-capped so a later
+	// append through the slice can never clobber a neighboring sequence.
+	take := func(start int) []byte { return arena[start:len(arena):len(arena)] }
+
 	for i, c := range fire.Palette {
-		fr := rgb(c)
-		fgSeq[i] = []byte("\x1b[38;2;" + fr + "m")
-		bgSeq[i] = []byte("\x1b[48;2;" + fr + "m")
+		s := len(arena)
+		arena = appendRGB(append(arena, "\x1b[38;2;"...), c)
+		arena = append(arena, 'm')
+		fgSeq[i] = take(s)
+
+		s = len(arena)
+		arena = appendRGB(append(arena, "\x1b[48;2;"...), c)
+		arena = append(arena, 'm')
+		bgSeq[i] = take(s)
 	}
 	for t := range fire.Palette {
-		ft := rgb(fire.Palette[t])
 		for b := range fire.Palette {
-			pairSeq[t][b] = []byte("\x1b[38;2;" + ft + ";48;2;" + rgb(fire.Palette[b]) + "m")
+			s := len(arena)
+			arena = appendRGB(append(arena, "\x1b[38;2;"...), fire.Palette[t])
+			arena = appendRGB(append(arena, ";48;2;"...), fire.Palette[b])
+			arena = append(arena, 'm')
+			pairSeq[t][b] = take(s)
 		}
 	}
+}
+
+// appendRGB appends "r;g;b" without allocating.
+func appendRGB(b []byte, c [3]uint8) []byte {
+	b = appendUint(b, int(c[0]))
+	b = append(b, ';')
+	b = appendUint(b, int(c[1]))
+	b = append(b, ';')
+	return appendUint(b, int(c[2]))
 }
 
 type Renderer struct {
@@ -57,15 +85,32 @@ type Renderer struct {
 }
 
 func New(f *fire.Fire) *Renderer {
-	w, h := f.Width(), f.Height()
-	return &Renderer{
-		prev: make([]uint8, w*h),
-		full: true,
-		// Worst case per cell: cursor move (~10) + combined fg+bg SGR (~36) +
-		// glyph (3) ≈ 49 bytes. Over-allocate to 56 so the buffer never grows
-		// mid-animation (a reallocation would trigger GC and a visible hitch).
-		buf: make([]byte, 0, w*(h/2)*56+64),
+	r := &Renderer{}
+	r.Resize(f)
+	return r
+}
+
+// bufCap is the worst-case frame size, so the buffer never grows mid-animation
+// (a reallocation would trigger GC and a visible hitch). A drawn cell costs at
+// most a combined fg+bg SGR (36 bytes) + glyph (3) = 39. Cursor moves (<=24
+// bytes) only follow a skipped cell or start a row: a skipped cell's unused
+// 39-byte budget covers its run's move, leaving one move per row unpaid.
+func bufCap(w, h int) int { return w*(h/2)*39 + (h/2)*24 + 64 }
+
+// Resize re-fits the renderer to f's dimensions and forces a full redraw,
+// reusing existing capacity so a stream of resize events doesn't churn
+// hundreds of KB of garbage per event.
+func (r *Renderer) Resize(f *fire.Fire) {
+	// prev needs no clearing: the forced full frame overwrites every cell.
+	if size := f.Width() * f.Height(); cap(r.prev) >= size {
+		r.prev = r.prev[:size]
+	} else {
+		r.prev = make([]uint8, size)
 	}
+	if c := bufCap(f.Width(), f.Height()); cap(r.buf) < c {
+		r.buf = make([]byte, 0, c)
+	}
+	r.full = true
 }
 
 // Reset forces the next Frame to redraw every cell (e.g. after a resize/clear).
